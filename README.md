@@ -60,7 +60,7 @@ For these operations, the request must include the headers: "Accept: application
 ### GET $pod/*
 
 * returns all json object stored in this pod
-* structured as { "_version": ..., "resources":[ {...}, {...}, ... ], ... }
+* structured as { "_version": ..., "members":[ {...}, {...}, ... ], ... }
 
 ### GET $pod/**
 
