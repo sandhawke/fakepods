@@ -65,6 +65,7 @@ For these operations, the request must include the headers: "Accept: application
 ### GET $pod/**
 
 * like * except related available objects in other pods are also returned
+* if this were a real pod, this would rely in part on the &properties and &match parameters as a way to find data, not just to limit it
 
 ### GET $pod ... ?args
 
