@@ -36,6 +36,14 @@ GET from $pod
 
 * get some basic information about the pod, if it exists
 
+```shell
+$ curl http://alice.fakepods.com
+{
+    "_id": "http://alice.fakepods.com",
+    "resourcesCreated": 1
+}
+```
+
 POST to $pod
 ------------
 
