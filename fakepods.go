@@ -6,6 +6,8 @@ Cluster, the Pod, and the Resource.  What happens when someone is
 slowly PUT'ing new bytes to a resource when someone else is reading
 it?
 
+
+
 */
 
 package main
@@ -23,6 +25,9 @@ import (
 	//"errors"
 	"encoding/json"
 	"strconv"
+	"sort"
+    "log/syslog"
+	"flag"
 )
 
 type Resource struct {
@@ -35,6 +40,11 @@ type Resource struct {
 func (res* Resource) UpdateData() {
 	res.Data["_version"] = res.LastMod
 }
+
+type ById []jsonobj
+func (a ById) Len() int { return len(a) }
+func (a ById) Swap(i, j int)  { a[i], a[j] = a[j], a[i] }
+func (a ById) Less(i, j int) bool { return a[i]["_id"].(string) < a[j]["_id"].(string) }
 
 type Pod struct {
 	URL string
@@ -62,18 +72,29 @@ var version = uint64(0)
 
 func main() {
 	
-	log.Printf("Trying port 80\n");
-    http.HandleFunc("/", homeHandler)
-	err := http.ListenAndServe(fmt.Sprintf(":%d", 80), nil)
-	if err != nil {
-		log.Printf("Didn't work, trying port 8000\n");
-		err := http.ListenAndServe(fmt.Sprintf(":%d", 8000), nil)
-		if err != nil {
-			log.Fatal("ListenAndServe: ", err)
-		}
-	}
-    
+	var root = flag.Bool("root", false, "assume root (port 80, syslog)")
+	flag.Parse()
 
+    http.HandleFunc("/", homeHandler)
+
+	var port string
+	if *root {
+		logwriter, e := syslog.New(syslog.LOG_NOTICE, "fakepods")
+		if e == nil {
+			log.Printf("logging to syslog\n");
+			log.SetOutput(logwriter)
+		} else {
+			log.Fatal("syslog: ", e)
+		}
+		port = "80"
+	} else {
+		port = "8000"
+	}
+	log.Printf("server started, listening on port %s", port)
+	err := http.ListenAndServe(":"+port, nil)
+	if err != nil {
+		log.Fatal("ListenAndServe: ", err)
+	}
 }
 
 var validPodname *regexp.Regexp
@@ -110,8 +131,8 @@ func homeHandler(w http.ResponseWriter, r *http.Request) {
 		if len(hostparts) > 2 && hostparts[0] != "www" {
 			podname = hostparts[0]
 			podURL = "http://"+r.Host
-			path = r.URL.Path[1:]		
 		}
+		path = r.URL.Path[1:]		
 	}
 	if podname != "" && !validPodname.MatchString(podname) {
 		w.WriteHeader(http.StatusBadRequest)
@@ -121,7 +142,7 @@ func homeHandler(w http.ResponseWriter, r *http.Request) {
 
 
 	log.Printf("\n")
-	log.Printf("PodURL  %q\n", podURL)
+	log.Printf("PodURL  %q", podURL)
 	log.Printf("Podname %q\n", podname)
 	log.Printf("Path    %q\n", path)
 
@@ -193,7 +214,7 @@ func homeHandler(w http.ResponseWriter, r *http.Request) {
 			if podname != "" {
 				if pod == nil { http.NotFound(w,r); return }
 				obj:=jsonobj{
-					"_type": "Pod",
+					//"_type": "Pod",
 					"_id":podURL,
 					"resourcesCreated":pod.ResourceCounter,
 				}
@@ -208,7 +229,7 @@ func homeHandler(w http.ResponseWriter, r *http.Request) {
 					}
 					items = append(items, obj)
 				}
-				frame:=jsonobj{"_type":"PodCluster", "pods":items}
+				frame:=jsonobj{/*"_type":"PodCluster",*/ "pods":items}
 				offerJSON(w,r,frame)
 			}
 		case "*":
@@ -222,9 +243,9 @@ func homeHandler(w http.ResponseWriter, r *http.Request) {
 					items = append(items, res.Data)
 				}
 			}
-			offerJSON(w,r,jsonobj{"_version":version,"resources":items})
+			offerJSON(w,r,jsonobj{"_version":version,"_members":items})
 		case "**":
-			items := make([]interface{},0)
+			items := make([]jsonobj,0)
 			for podURL, pod := range pods {
 				for path, res := range pod.Resources {
 					if res.Data != nil {
@@ -235,7 +256,8 @@ func homeHandler(w http.ResponseWriter, r *http.Request) {
 					} // else it's non JSON...
 				}
 			}
-			offerJSON(w,r,jsonobj{"_version":version,"resources":items})
+			sort.Sort(ById(items))
+			offerJSON(w,r,jsonobj{"_version":version,"_members":items})
 		default:
 			if res == nil { 
 				http.NotFound(w,r) 
@@ -254,6 +276,8 @@ func homeHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	case "HEAD": 
 		// this is oddly handled by go.   hrm.
+	case "CRASH":
+		panic("just testing")
 	case "OPTIONS": 
 		// needed for CORS pre-flight
 		return
@@ -298,9 +322,19 @@ func homeHandler(w http.ResponseWriter, r *http.Request) {
 			log.Printf("%+v", res.Data)
 		}
 	case "PUT":
+		if path == "**" {
+			if version == 0 {
+				//	if strings.HasPrefix(r.RemoteAddr, "127.0.0.1:") {
+				restoreCluster(r.Body)
+			} else {
+				w.WriteHeader(500)
+				fmt.Fprintf(w, "Only supported as first write after server restart\n")
+			}
+			return
+		} 
 		if res == nil {
 			w.WriteHeader(http.StatusMethodNotAllowed)
-			fmt.Fprintf(w, "Use POST to the pod URL to create, please")
+			fmt.Fprintf(w, "Use POST to the pod URL to create, please\n")
 			return
 		}
 		// replace res
@@ -351,4 +385,48 @@ func changeWasMade() {
 			return
 		}
 	}
+}
+
+func restoreCluster(src io.Reader) {
+	dec := json.NewDecoder(src)
+	var v jsonobj
+	if err := dec.Decode(&v); err != nil {
+		log.Println(err)
+		return
+	}
+	//var err error
+	version = uint64(v["_version"].(float64))
+	log.Printf("version %d", version)
+	//var members []jsonobj
+	members := v["_members"].([]interface{})
+	//log.Printf("members: %d %q", len(members), members)
+	for i,obj := range members {
+		log.Printf("member %d: %q\n\n", i, obj)
+
+		// only works for JSON for now
+		res := new(Resource)
+		res.ContentType = "application/json"
+		res.Data = jsonobj(obj.(map[string]interface {}))
+		res.LastMod = uint64(res.Data["_version"].(float64))
+
+		// lookup the _owner pod
+		podURL := res.Data["_owner"].(string)
+		pod, podExists := pods[podURL]
+		if !podExists {
+			pod = NewPod(podURL)
+			pods[podURL] = pod
+		}
+
+		// find the .name   -- will mess up if clster wasnt empty
+		name := res.Data["_id"].(string)[len(podURL)+1:]
+		pod.ResourceCounter++
+		pod.Resources[name] = res
+		
+		log.Printf("PodURL  %q\n", podURL)
+		log.Printf("exists  %q\n", podExists)
+		log.Printf("nameL  %q\n", name)
+
+		// maybe delete extra _foo items from res.Data ?
+	}
+	
 }
