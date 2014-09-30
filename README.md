@@ -1,16 +1,22 @@
-"Fakepods" is a golang crosscloud pod server that isn't actually
-decentralized.  It's good for testing and app development, and just
-playing around with different possible APIs.  At some point it might
-grow up to be a real boy.
+"Fakepods" is a Crosscloud pod server that isn't actually
+decentralized.  It's running at http://USERNAME.fakepods.com, or you
+can run your own copy. It's good for testing and app development, and
+for helping us playing around with different possible APIs.  At some
+point it might grow up to be a real boy.
 
-At the moment it keeps all data in ram, so everything is lost when the
-server restarts.  It's also probably crawling with race conditions.
-It's my second golang program, and I'm still trying to understand how
-concurrency is best managed.
+At the moment it keeps all data in RAM.  You can do persistance
+manually by dumping the contents before shutdown and then restoring
+them on startup.   Kind of an odd hack for now.
+
+It's also crawling with race conditions.  It needs locks on the data
+structures.  So do not trust it with your data!
+
+It implements the Simple Crosscloud RESTful Pod Interface (SCRPI,
+pronounced "scrappy"), as below.
 
 
-Simplified Crosscloud Pod Interface ("skippy") UNSTABLE 
-=======================================================
+SCRPI (Unstable)
+================
 
 This REST interface for communicating with a user's personal online
 database (pod) favors simplicity and does not require any knowledge of
@@ -22,57 +28,61 @@ this will suffice.
 For this documentation, we'll use $pod to stand for the URL of a pod
 and $res to stand for the URL of a particular data object (aka
 "resource").  For example, $pod might be "http://alice.fakepods.com"
-and $obj might be "http://alice.fakepods.com/r3423".  (This simplified
-interface does not allow applications to choose URLs.)
+and $res might be "http://alice.fakepods.com/r3423".
 
-Single-Resource Operations
---------------------------
 
-### POST to $pod
+GET from $pod
+-------------
+
+* get some basic information about the pod, if it exists
+
+POST to $pod
+------------
 
 * the requested content will be stored on the pod at a new $res URL
 * if successful, 201 response will include a header, Location: $res, indicating where it was put 
 * certain content types have special handling
-* for pod data, use application/json, structured as an {...} object, and do not use any key names starting with '@' or '_'.  You may include nested objects, but consider creating them as separate resources and linked to them
+* for pod data, use application/json, structured as an {...} object, and do not use any key names starting with '@' or '_'.  You may include nested objects, but consider creating them as separate resources and linked to them.  Give the properties reasonable English names without spaces, for now; do not make them be data.
 
+GET from $pod/_active
+---------------------
 
-### PUT to $res  (NOT IMPLEMENTED)
+* get a list of all the resources currently on the pod
+* structured at ```{ ..., _members=[ { _id=$res1, ... }, { _id=$res2, ... } ] }```
 
-* replaces the content of that object
+GET from $pod/_nearby
+---------------------
 
-### GET from $res
+* get a list of all the resources available to the pod and relevant to the current operation
+* structured the same as $pod/_active
+* on a fakepod is simply taken from all the other pods on the same server
+
+GET from $res
+-------------
 
 * returns stored content
 * if it was an application/json {...} object, certain additional properties will be added, including but not limited to:
+** _id the object's canonical URL (basically the same as $res)
 ** _owner the URL of the pod
-** _version a numeric incrementing value
-** _id the object's canonical URL
+** _etag a code indicating this version
 
-### DELETE $res (NOT IMPLEMENTED)
+PUT to $res  (NOT IMPLEMENTED)
+------------------------------
 
-* removes the data.   That $res will not be reused.
+* replaces the content of that object
 
-Data Query Operations
----------------------
+DELETE $res (NOT IMPLEMENTED)
+-----------------------------
 
-For these operations, the request must include the headers: "Accept: application/json" and the response will always have "Content-Type: application/json".
+* removes the data.   That $res will not be re-assigned as long as this server remembers its state.
 
-### GET $pod/*
+Long polling with Wait-For-None-Match
+-------------------------------------
 
-* returns all json object stored in this pod
-* structured as { "_version": ..., "members":[ {...}, {...}, ... ], ... }
+* On a GET request, if the header Wait-For-None-Match is present with the value being an etag for the current version, then the server will pause, keeping the connection open until the resource changes to not match that etag.  At that point, processing will proceed normally, as if this header were not present, with the new content being returned.
+* The connection might be closed by the server or an intermediate cache.  Some firewalls and proxies close these connections after 60 seconds, so the client should be prepared to re-open it.
 
-### GET $pod/**
+Query Parameters
+----------------
 
-* like * except related available objects in other pods are also returned
-* if this were a real pod, this would rely in part on the &properties and &match parameters as a way to find data, not just to limit it
-
-### GET $pod ... ?args
-
-* used to query for a subset of the data and control operations
-* properties=[p1,p2,....] only include the given properties (NOT IMPLEMENTED)
-* match={p1:val, p2:val, ...} only include matching objects (like mongodb) (NOT IMPLEMENTED)
-* wait-for-version-after=v -- response will be delayed until there is a version after v (longpoll)
-* after-version=v only include versions after given v (NOT IMPLEMENTED)
-* wait-for-changes -- response will be delayed until there is some change in the result (longpoll) (NOT IMPLEMENTED)
-
+* Coming soon

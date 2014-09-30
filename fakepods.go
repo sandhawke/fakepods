@@ -28,6 +28,7 @@ import (
 	"sort"
     "log/syslog"
 	"flag"
+	"os"
 )
 
 type Resource struct {
@@ -38,7 +39,7 @@ type Resource struct {
 }
 
 func (res* Resource) UpdateData() {
-	res.Data["_version"] = res.LastMod
+	res.Data["_etag"] = res.LastMod
 }
 
 type ById []jsonobj
@@ -73,7 +74,16 @@ var version = uint64(0)
 func main() {
 	
 	var root = flag.Bool("root", false, "assume root (port 80, syslog)")
+	var restore = flag.String("restore", "", "restore state from this json dump file")
 	flag.Parse()
+
+	if *restore != "" {
+		fi, err := os.Open(*restore)
+		if err != nil {
+			panic(err)
+		}
+		restoreCluster(fi)
+	}
 
     http.HandleFunc("/", homeHandler)
 
@@ -151,21 +161,21 @@ func homeHandler(w http.ResponseWriter, r *http.Request) {
 
 
 	if r.Method == "GET" { 
-		var err error
 		r.ParseForm() 
 		log.Printf("Args    %q\n", r.Form)
+	}
 
-		// Now, let's see if we need to wait...
-		var waitForVersionAfter uint64
-		var vals []string
+	// long poll 
+	if r.Method == "GET" { 
+		var err error
 		var val string
-		vals = r.Form["wait-for-version-after"]
-		if len(vals) == 1 {
-			val = vals[0]
+		var waitForVersionAfter uint64
+
+		if val = r.Header.Get("Wait-For-None-Match"); val != "" {
 			log.Printf("wait-for-version-after  %q\n", val)
 			waitForVersionAfter,err = strconv.ParseUint(val, 10, 64)
 			if err != nil {
-				log.Println("converting wait-for-version-after:", err)
+				log.Println("converting Wait-For-None-Match:", err)
 			}
 			if version == 0 && waitForVersionAfter != 0 {
 				// server must have just restarted; don't wait
@@ -174,7 +184,7 @@ func homeHandler(w http.ResponseWriter, r *http.Request) {
 				if waitForVersionAfter >= version {
 					pauseForChanges()
 				} else {
-					log.Printf("waiting for old version %d, at %d",
+					log.Printf("Wait-For-None-Match already satisfied %d, at %d",
 						waitForVersionAfter, version);
 				}
 			}
@@ -194,12 +204,13 @@ func homeHandler(w http.ResponseWriter, r *http.Request) {
 		res = pod.Resources[path]
 	}
 		
+	log.Printf("Checking origin\n");
 	if origin := r.Header.Get("Origin"); origin != "" {
 		log.Printf("Allowing access from origin: %q\n", origin)
         w.Header().Set("Access-Control-Allow-Origin", origin)
         w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS, PUT, DELETE, PATCH")
         w.Header().Set("Access-Control-Allow-Headers",
-            "Accept, Content-Type, Content-Length, Accept-Encoding, X-CSRF-Token, Authorization")
+            "Accept, Content-Type, Content-Length, Accept-Encoding, X-CSRF-Token, Authorization, Wait-For-None-Match")
     }
 
 	log.Printf("Method  %q\n", r.Method)
@@ -232,32 +243,32 @@ func homeHandler(w http.ResponseWriter, r *http.Request) {
 				frame:=jsonobj{/*"_type":"PodCluster",*/ "pods":items}
 				offerJSON(w,r,frame)
 			}
-		case "*":
+		case "_active":
 			if pod == nil { http.NotFound(w,r); return }
 			items := make([]interface{},0)
 			for path, res := range pod.Resources {
 				if res.Data != nil {
 					res.Data["_owner"] = podURL
 					res.Data["_id"] = podURL+"/"+path
-					res.Data["_version"] = res.LastMod
+					res.Data["_etag"] = res.LastMod
 					items = append(items, res.Data)
 				}
 			}
-			offerJSON(w,r,jsonobj{"_version":version,"_members":items})
-		case "**":
+			offerJSON(w,r,jsonobj{"_etag":version,"_members":items})
+		case "_nearby":
 			items := make([]jsonobj,0)
 			for podURL, pod := range pods {
 				for path, res := range pod.Resources {
 					if res.Data != nil {
 						res.Data["_owner"] = podURL
 						res.Data["_id"] = podURL+"/"+path
-						res.Data["_version"] = res.LastMod
+						res.Data["_etag"] = res.LastMod
 						items = append(items, res.Data)
 					} // else it's non JSON...
 				}
 			}
 			sort.Sort(ById(items))
-			offerJSON(w,r,jsonobj{"_version":version,"_members":items})
+			offerJSON(w,r,jsonobj{"_etag":version,"_members":items})
 		default:
 			if res == nil { 
 				http.NotFound(w,r) 
@@ -322,16 +333,6 @@ func homeHandler(w http.ResponseWriter, r *http.Request) {
 			log.Printf("%+v", res.Data)
 		}
 	case "PUT":
-		if path == "**" {
-			if version == 0 {
-				//	if strings.HasPrefix(r.RemoteAddr, "127.0.0.1:") {
-				restoreCluster(r.Body)
-			} else {
-				w.WriteHeader(500)
-				fmt.Fprintf(w, "Only supported as first write after server restart\n")
-			}
-			return
-		} 
 		if res == nil {
 			w.WriteHeader(http.StatusMethodNotAllowed)
 			fmt.Fprintf(w, "Use POST to the pod URL to create, please\n")
@@ -395,8 +396,8 @@ func restoreCluster(src io.Reader) {
 		return
 	}
 	//var err error
-	version = uint64(v["_version"].(float64))
-	log.Printf("version %d", version)
+	version = uint64(v["_etag"].(float64))
+	log.Printf("etag %d", version)
 	//var members []jsonobj
 	members := v["_members"].([]interface{})
 	//log.Printf("members: %d %q", len(members), members)
@@ -407,7 +408,7 @@ func restoreCluster(src io.Reader) {
 		res := new(Resource)
 		res.ContentType = "application/json"
 		res.Data = jsonobj(obj.(map[string]interface {}))
-		res.LastMod = uint64(res.Data["_version"].(float64))
+		res.LastMod = uint64(res.Data["_etag"].(float64))
 
 		// lookup the _owner pod
 		podURL := res.Data["_owner"].(string)
