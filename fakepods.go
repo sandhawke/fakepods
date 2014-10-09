@@ -26,9 +26,10 @@ import (
 	"encoding/json"
 	"strconv"
 	"sort"
-    "log/syslog"
 	"flag"
 	"os"
+	"time"
+	
 )
 
 type Resource struct {
@@ -73,13 +74,31 @@ var version = uint64(0)
 
 func main() {
 	
-	var root = flag.Bool("root", false, "assume root (port 80, syslog)")
-	var restore = flag.String("restore", "", "restore state from this json dump file")
+	var port = flag.String("port", "8080", "web server port")
+	var logdir = flag.String("logdir", "/var/log/fakepods", "where to put the log files")
+	var dolog = flag.Bool("log", false, "log to file instead of stdout")
+	var restore = flag.String("restore", "", "restore state from given json dump file")
 	flag.Parse()
+
+	if *dolog {
+		err := os.MkdirAll(*logdir, 0700)
+		if err != nil {
+			panic(err)
+		}
+		logfilename := *logdir+"/log-"+time.Now().Format("20060102-030405")
+		fmt.Printf("logging to %s\n", logfilename)
+		logfile, err := os.Create(logfilename)
+		if err != nil {
+			// not sure why I'm getting "No such file or directory" 
+			// panic(err)
+		}
+		log.SetOutput(logfile)
+	}
 
 	if *restore != "" {
 		fi, err := os.Open(*restore)
 		if err != nil {
+			log.Fatal(err)
 			panic(err)
 		}
 		restoreCluster(fi)
@@ -87,21 +106,8 @@ func main() {
 
     http.HandleFunc("/", homeHandler)
 
-	var port string
-	if *root {
-		logwriter, e := syslog.New(syslog.LOG_NOTICE, "fakepods")
-		if e == nil {
-			log.Printf("logging to syslog\n");
-			log.SetOutput(logwriter)
-		} else {
-			log.Fatal("syslog: ", e)
-		}
-		port = "80"
-	} else {
-		port = "8000"
-	}
-	log.Printf("server started, listening on port %s", port)
-	err := http.ListenAndServe(":"+port, nil)
+	log.Printf("server started, listening on port %s", *port)
+	err := http.ListenAndServe(":"+*port, nil)
 	if err != nil {
 		log.Fatal("ListenAndServe: ", err)
 	}
@@ -209,6 +215,8 @@ func homeHandler(w http.ResponseWriter, r *http.Request) {
 		log.Printf("Allowing access from origin: %q\n", origin)
         w.Header().Set("Access-Control-Allow-Origin", origin)
         w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS, PUT, DELETE, PATCH")
+        w.Header().Set("Access-Control-Expose-Headers",
+			"Location, ETag")
         w.Header().Set("Access-Control-Allow-Headers",
             "Accept, Content-Type, Content-Length, Accept-Encoding, X-CSRF-Token, Authorization, Wait-For-None-Match")
     }
@@ -221,6 +229,9 @@ func homeHandler(w http.ResponseWriter, r *http.Request) {
 		// @@ IMPLEMENT
 	case "GET":
 		switch path {
+		case "_trace": 
+			// launch a goroutine that copies the recent and ongoing
+			// log entries
 		case "":
 			if podname != "" {
 				if pod == nil { http.NotFound(w,r); return }
@@ -338,8 +349,29 @@ func homeHandler(w http.ResponseWriter, r *http.Request) {
 			fmt.Fprintf(w, "Use POST to the pod URL to create, please\n")
 			return
 		}
-		// replace res
-		// version++
+		res.ContentType = r.Header["Content-Type"][0]
+		log.Printf("Content type was %q", res.ContentType)
+		if semi := strings.Index(res.ContentType, ";"); semi>0 {
+			res.ContentType = res.ContentType[0:semi]
+		}
+		log.Printf("Content type was %q", res.ContentType)
+		newBody := bytes.Buffer{}
+		newBody.ReadFrom(r.Body)
+		res.Body = newBody
+		log.Printf("Body was %q", res.Body)
+		
+		res.LastMod++
+		pod.NextVersion++
+
+		if res.ContentType == "application/json" || res.ContentType == "application/x-www-form-urlencoded" {
+			log.Printf("Parsing JSON %q\n", res.Body.String())
+			err := json.Unmarshal(res.Body.Bytes(), &res.Data)
+			if err != nil {
+				log.Println("error:", err)
+			}
+			log.Printf("%+v", res.Data)
+		}
+		changeWasMade()
 	}
 }
 
