@@ -1,12 +1,6 @@
 /*
 
-Doesn't do concurrency properly, I think.  We probably need locks of
-some sort, or goroutines, on each of the main structures -- the
-Cluster, the Pod, and the Resource.  What happens when someone is
-slowly PUT'ing new bytes to a resource when someone else is reading
-it?
-
-
+Likely has race conditions.   Needs rwlocks, etc.
 
 */
 
@@ -85,9 +79,9 @@ func main() {
 		if err != nil {
 			panic(err)
 		}
-		logfilename := *logdir+"/log-"+time.Now().Format("20060102-030405")
+		logfilename := *logdir+"/log-"+time.Now().Format("20060102")
 		fmt.Printf("logging to %s\n", logfilename)
-		logfile, err := os.Create(logfilename)
+		logfile, err := os.OpenFile(logfilename, os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0611);
 		if err != nil {
 			// not sure why I'm getting "No such file or directory" 
 			// panic(err)
@@ -222,6 +216,7 @@ func homeHandler(w http.ResponseWriter, r *http.Request) {
     }
 
 	log.Printf("Method  %q\n", r.Method)
+	var filter jsonobj;
 	switch r.Method {
 	case "DELETE":
 		if res == nil {
@@ -229,6 +224,20 @@ func homeHandler(w http.ResponseWriter, r *http.Request) {
 		// @@ IMPLEMENT
 	case "GET":
 		switch path {
+
+
+			// ridiculous, of course....
+		case "_login/0.1.1-alpha-sandro/network.html":
+			http.ServeFile(w,r,"/sites/fakepods.com/_login/0.1.1-alpha-sandro/network.html");
+		case "_login/0.1.1-alpha-sandro/network.js":
+			http.ServeFile(w,r,"/sites/fakepods.com/_login/0.1.1-alpha-sandro/network.js");
+		case "_login/0.1.1/network.html":
+			http.ServeFile(w,r,"/sites/fakepods.com/_login/0.1.1-alpha-sandro/network.html");
+		case "_login/0.1.1/network.js":
+			http.ServeFile(w,r,"/sites/fakepods.com/_login/0.1.1-alpha-sandro/network.js");
+
+
+
 		case "_trace": 
 			// launch a goroutine that copies the recent and ongoing
 			// log entries
@@ -266,6 +275,13 @@ func homeHandler(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 			offerJSON(w,r,jsonobj{"_etag":version,"_members":items})
+		case "_q0":
+			err := json.Unmarshal([]byte(r.Form["jsonFilter"][0]), &filter)
+			if err != nil {
+				log.Println("json err on %q: %s", r.Form["jsonFilter"][0], err);
+				filter = jsonobj{};
+			}
+			fallthrough;
 		case "_nearby":
 			items := make([]jsonobj,0)
 			for podURL, pod := range pods {
@@ -274,7 +290,9 @@ func homeHandler(w http.ResponseWriter, r *http.Request) {
 						res.Data["_owner"] = podURL
 						res.Data["_id"] = podURL+"/"+path
 						res.Data["_etag"] = res.LastMod
-						items = append(items, res.Data)
+						if itemPassesFilter(res.Data, filter) {
+							items = append(items, res.Data)
+						}
 					} // else it's non JSON...
 				}
 			}
@@ -462,4 +480,44 @@ func restoreCluster(src io.Reader) {
 		// maybe delete extra _foo items from res.Data ?
 	}
 	
+}
+
+
+func itemPassesFilter(item, filter jsonobj) bool {
+	// log.Printf("\n\n- comparing %q and %q\n", item, filter);
+	for k,v := range filter {
+		var present = item[k];
+		if present == v {
+			// log.Printf("- comparing %q value %q %q: true!", k, v, item[k]);
+		} else {
+			switch t := v.(type) {
+			case string:
+				return false
+			case map[string]interface{}:
+
+				// conjoin all the operators, I guess...
+
+				vmap := jsonobj(v.(map[string]interface{}));
+				if (vmap["$exists"] == true) {
+					log.Printf("  %q exists?", k)
+					if present == nil {
+						return false;
+					} else {
+						log.Printf("      YES  %q", item[k])
+					}
+				} else if (vmap["$exists"] == false) {
+					if present != nil {
+						return false;
+					} else {
+						// okay
+					}
+				}
+
+			default:
+				log.Printf("- comparing %q value %q %q; FALSE (type %q)", k, v, item[k], t);
+				return false
+			}
+		}
+	}
+	return true;
 }
