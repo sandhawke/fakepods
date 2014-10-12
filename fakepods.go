@@ -2,6 +2,7 @@
 
 Likely has race conditions.   Needs rwlocks, etc.
 
+
 */
 
 package main
@@ -65,6 +66,7 @@ func StreamToString(stream io.Reader) string {
 
 var pods = make(map[string]*Pod)
 var version = uint64(0)
+var connectionCounter = 0;
 
 func main() {
 	
@@ -125,7 +127,9 @@ func homeHandler(w http.ResponseWriter, r *http.Request) {
           http://host.domain/pod/PODNAME[/PATH]
 
     */
-	log.Printf("Request %q\n", r)
+	connectionCounter++;
+	log.Printf("\n");
+	log.Printf("%d Request %q\n", connectionCounter, r)
 
 	var podURL, podname, path string
 	pathparts:=strings.Split(r.URL.Path, "/")
@@ -172,7 +176,7 @@ func homeHandler(w http.ResponseWriter, r *http.Request) {
 		var waitForVersionAfter uint64
 
 		if val = r.Header.Get("Wait-For-None-Match"); val != "" {
-			log.Printf("wait-for-version-after  %q\n", val)
+			log.Printf("%d wait-for-version-after  %q\n", connectionCounter, val)
 			waitForVersionAfter,err = strconv.ParseUint(val, 10, 64)
 			if err != nil {
 				log.Println("converting Wait-For-None-Match:", err)
@@ -391,6 +395,7 @@ func homeHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		changeWasMade()
 	}
+	log.Printf("%d done\n\n", connectionCounter);
 }
 
 func errorHandler(w http.ResponseWriter, r *http.Request, status int) {
@@ -490,7 +495,7 @@ func itemPassesFilter(item, filter jsonobj) bool {
 		if present == v {
 			// log.Printf("- comparing %q value %q %q: true!", k, v, item[k]);
 		} else {
-			switch t := v.(type) {
+			switch v.(type) {
 			case string:
 				return false
 			case map[string]interface{}:
@@ -514,7 +519,7 @@ func itemPassesFilter(item, filter jsonobj) bool {
 				}
 
 			default:
-				log.Printf("- comparing %q value %q %q; FALSE (type %q)", k, v, item[k], t);
+				// log.Printf("- comparing %q value %q %q; FALSE (type %q)", k, v, item[k], t);
 				return false
 			}
 		}
